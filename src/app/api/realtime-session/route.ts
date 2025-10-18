@@ -1,5 +1,6 @@
-// app/api/realtime-session/route.ts
 import { NextResponse } from "next/server";
+import { MODELS, VAD_CONFIG } from "@/config/constants";
+import type { RealtimeSessionResponse } from "@/types";
 
 export async function GET() {
   const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
@@ -9,14 +10,9 @@ export async function GET() {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-realtime", // or your chosen realtime model
-      input_audio_transcription: { model: "gpt-4o-transcribe" }, // or gpt-4o-mini-transcribe / whisper-1
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        silence_duration_ms: 500,
-        create_response: false,          // ⬅️ HARD OFF: don’t auto-create responses
-      },
+      model: MODELS.REALTIME,
+      input_audio_transcription: { model: MODELS.TRANSCRIBE },
+      turn_detection: VAD_CONFIG,
       instructions: "Transcribe only. Do not generate replies or audio.",
     }),
   });
@@ -25,6 +21,6 @@ export async function GET() {
     const msg = await r.text();
     return NextResponse.json({ error: msg }, { status: r.status });
   }
-  const data = await r.json();
+  const data = await r.json() as RealtimeSessionResponse;
   return NextResponse.json({ client_secret: data.client_secret });
 }

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { MODELS, TIMEOUTS } from "@/config/constants";
+import type { FinalQuestionRequest, FinalQuestionResponse } from "@/types";
 
 // Embed the syllabus server-side so you don't ship it from the client each time.
 const SYLLABUS = `
@@ -71,7 +73,7 @@ export async function POST(req: Request) {
     const label = scope === "first2_5" ? "FIRST 2.5 MINUTES" : "FULL SESSION";
 
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), 30_000);
+    const timeout = setTimeout(() => ac.abort(), TIMEOUTS.FINAL_QUESTIONS);
 
     try {
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -81,7 +83,7 @@ export async function POST(req: Request) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "o3-2025-04-16",
+          model: MODELS.CHAT,
           messages: [
             {
               role: "system",

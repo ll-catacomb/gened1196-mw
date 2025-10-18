@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { MODELS, TIMEOUTS } from "@/config/constants";
+import type { BasicQuestionRequest, BasicQuestionResponse } from "@/types";
 
 export async function POST(req: Request) {
   try {
@@ -8,7 +10,7 @@ export async function POST(req: Request) {
     }
 
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), 150_000);
+    const timeout = setTimeout(() => ac.abort(), TIMEOUTS.CHECKPOINT_QUESTIONS);
     try {
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -17,7 +19,7 @@ export async function POST(req: Request) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "o3-2025-04-16",
+          model: MODELS.CHAT,
           messages: [
             {
               role: "system",

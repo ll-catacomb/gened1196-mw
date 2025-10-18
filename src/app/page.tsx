@@ -1,484 +1,1135 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AudioRecorder, blobToFile } from "@/utils/audioRecorder";
+import { formatMMSS } from "@/utils/formatters";
 
-type OAIEvent = { type?: string; delta?: string; text?: { delta?: string } } | any;
-
-const CHECKPOINT_MS = 30_000;
-const FINAL_WINDOW_MS = 150_000; // 2.5 min
+type Stage = "prep-select" | "prep-countdown" | "recording-prompt" | "recording-name" | "presentation" | "question-mode" | "questions" | "complete";
+type QuestionMode = "human" | "bot" | null;
 
 export default function Home() {
-  const [connected, setConnected] = useState(false);
-  const [liveText, setLiveText] = useState("");
-  const [finalText, setFinalText] = useState("");
-  const [err, setErr] = useState<string>("");
-
-  // Elapsed clock
-  const [elapsedMs, setElapsedMs] = useState(0);
-
-  // Checkpoint questions list (each entry: { tSec, questions })
-  const [checkpoints, setCheckpoints] = useState<{ tSec: number; questions: string }[]>([]);
-  const [cpLoading, setCpLoading] = useState(false);
-
-  // Final-2.5min and Final-Stop questions
-  const [final2p5, setFinal2p5] = useState<string>("");
-  const [final2p5Loading, setFinal2p5Loading] = useState(false);
-  const [finalStop, setFinalStop] = useState<string>("");
-  const [finalStopLoading, setFinalStopLoading] = useState(false);
-
-  // Visible transcript (auto-refreshes every 10s)
-  const [displayTranscript, setDisplayTranscript] = useState("");
-
-  // WebRTC / timers
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-
-  // Refs for live timing/state
-  const firstDeltaAtRef = useRef<number | null>(null);
-  const liveTextRef = useRef<string>("");
-  const finalTextRef = useRef<string>("");
-  const checkpointsRef = useRef<{ tSec: number; questions: string }[]>([]);
-  const lastDeltaTsRef = useRef<number>(0);
-
-  // Schedulers
-  const cpTickerRef = useRef<number | null>(null);       // 1s ticker for checkpoints
-  const lastCpIndexRef = useRef<number>(0);              // last checkpoint index fired
-  const final2p5TimerRef = useRef<number | null>(null);  // 2.5 min timer
-  const clockIntervalRef = useRef<number | null>(null);  // mm:ss clock
-  const uiRefreshIntervalRef = useRef<number | null>(null); // transcript UI refresh (10s)
-
-  // keep refs in sync
-  useEffect(() => { liveTextRef.current = liveText; }, [liveText]);
-  useEffect(() => { finalTextRef.current = finalText; }, [finalText]);
-  useEffect(() => { checkpointsRef.current = checkpoints; }, [checkpoints]);
-
-  // Build transcript string from refs
-  function snapshotTranscript() {
-    return (
-      finalTextRef.current +
-      (finalTextRef.current && liveTextRef.current ? "\n" : "") +
-      liveTextRef.current
-    ).trim();
-  }
-
-  // Immediately reflect any state change in the visible transcript
+  // Stage management
+  const [stage, setStage] = useState<Stage>("prep-select");
+  const [prepTime, setPrepTime] = useState<number>(0); // 300 or 450 seconds
+  const [prepTimeRemaining, setPrepTimeRemaining] = useState<number>(0);
+  const [presentationTime, setPresentationTime] = useState<number>(0); // Count up to 370s (6:10)
+  const [questionMode, setQuestionMode] = useState<QuestionMode>(null);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+  const [questionTime, setQuestionTime] = useState<number>(0); // 60s per question
+  
+  // Student data
+  const [studentName, setStudentName] = useState<string>("");
+  const [studentCards, setStudentCards] = useState<string[]>([]);
+  
+  // Recording and transcription
+  const audioRecorderRef = useRef<AudioRecorder | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState<string>("");
+  
+  // Generated questions
+  const [finalQuestions, setFinalQuestions] = useState<string[]>([
+    "Question 1 will appear here",
+    "Question 2 will appear here", 
+    "Question 3 will appear here"
+  ]);
+  const [questionsLoading, setQuestionsLoading] = useState(false);
+  
+  // Question answers (recorded during question phase)
+  const [questionAnswers, setQuestionAnswers] = useState<string[]>(["", "", ""]);
+  const questionStartTimeRef = useRef<number>(0);
+  
+  // Text-to-speech for bot mode
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  
+  // Timers
+  const prepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const presentationTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const questionTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Cleanup timers on unmount
   useEffect(() => {
-    setDisplayTranscript(snapshotTranscript());
-  }, [finalText, liveText]);
-
-  // 10s UI refresh to ensure on-screen transcript stays current
-  useEffect(() => {
-    if (!connected) {
-      if (uiRefreshIntervalRef.current !== null) {
-        clearInterval(uiRefreshIntervalRef.current);
-        uiRefreshIntervalRef.current = null;
-      }
-      return;
-    }
-    uiRefreshIntervalRef.current = window.setInterval(() => {
-      setDisplayTranscript(snapshotTranscript());
-    }, 10_000);
     return () => {
-      if (uiRefreshIntervalRef.current !== null) {
-        clearInterval(uiRefreshIntervalRef.current);
-        uiRefreshIntervalRef.current = null;
-      }
+      if (prepTimerRef.current) clearInterval(prepTimerRef.current);
+      if (presentationTimerRef.current) clearInterval(presentationTimerRef.current);
+      if (questionTimerRef.current) clearInterval(questionTimerRef.current);
     };
-  }, [connected]);
-
-  // idle flush (defensive)
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (!connected) return;
-      if (!liveTextRef.current) return;
-      const now = Date.now();
-      if (now - lastDeltaTsRef.current > 5000) {
-        const chunk = liveTextRef.current.trim();
-        if (chunk) {
-          setFinalText((prev) => (prev && !prev.endsWith("\n") ? prev + "\n" : prev) + chunk + "\n");
+  }, []);
+  
+  // ============ STAGE 1: Prep Time Selection ============
+  const startPrepTime = (minutes: number) => {
+    const seconds = minutes * 60;
+    setPrepTime(seconds);
+    setPrepTimeRemaining(seconds);
+    setStage("prep-countdown");
+    
+    // Start countdown
+    prepTimerRef.current = setInterval(() => {
+      setPrepTimeRemaining(prev => {
+        if (prev <= 1) {
+          if (prepTimerRef.current) clearInterval(prepTimerRef.current);
+          setStage("recording-prompt");
+          return 0;
         }
-        setLiveText("");
-        liveTextRef.current = "";
-      }
-    }, 2000);
-    return () => clearInterval(id);
-  }, [connected]);
-
-  // ---- Helpers: API calls ----
-  async function askCheckpointQuestions(tSec: number, text: string) {
+        return prev - 1;
+      });
+    }, 1000);
+  };
+  
+  // Skip prep time if student is ready
+  const skipPrepTime = () => {
+    if (prepTimerRef.current) clearInterval(prepTimerRef.current);
+    setStage("recording-prompt");
+  };
+  
+  // ============ STAGE 3: Start Recording ============
+  const startRecording = async () => {
     try {
-      setCpLoading(true);
-      const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), 20_000);
-      try {
-        const res = await fetch("/api/q-basic", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, tSec }),
-          signal: ac.signal,
-        });
-        const ct = res.headers.get("content-type") || "";
-        if (!ct.includes("application/json")) {
-          const raw = await res.text();
-          throw new Error(`Non-JSON (${res.status}): ${raw.slice(0, 200)}...`);
-        }
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
-        const questions = typeof json.questions === "string" ? json.questions : "";
-        setCheckpoints((prev) => [...prev, { tSec, questions }]);
-      } finally {
-        clearTimeout(to);
-      }
-    } catch (e: any) {
-      setCheckpoints((prev) => [...prev, { tSec, questions: `(checkpoint error @ ${tSec}s) ${e?.message || e}` }]);
-    } finally {
-      setCpLoading(false);
+      // Get microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Initialize recorder with stream
+      audioRecorderRef.current = new AudioRecorder();
+      await audioRecorderRef.current.initialize(stream);
+      audioRecorderRef.current.start();
+      setIsRecording(true);
+      setStage("recording-name"); // Go to name recording stage, not presentation yet
+    } catch (error) {
+      console.error("Failed to start recording:", error);
+      alert("Could not access microphone. Please grant permission and try again.");
     }
-  }
-
-  function gatherAllCheckpointQuestions(): string {
-    return checkpointsRef.current.map((c) => c.questions).join("\n\n").trim();
-  }
-
-  // NEW: judge – pick top 3 from all checkpoint questions
-  async function askJudge(allQs: string, transcript: string, scope: "first2_5" | "full") {
-    if (!allQs.trim()) return "";
-    const ac = new AbortController();
-    const to = setTimeout(() => ac.abort(), 15_000);
+  };
+  
+  // ============ STAGE 4: Start Presentation Timer ============
+  const startPresentationTimer = () => {
+    setStage("presentation");
+    setPresentationTime(0);
+    
+    presentationTimerRef.current = setInterval(() => {
+      setPresentationTime(prev => {
+        if (prev >= 370) { // 6:10
+          stopPresentation();
+          return 370;
+        }
+        return prev + 1;
+      });
+    }, 1000);
+  };
+  
+  // ============ STAGE 4: Stop Presentation & Generate Questions ============
+  // Note: Recording continues for question answers
+  const stopPresentation = async () => {
+    if (presentationTimerRef.current) clearInterval(presentationTimerRef.current);
+    
+    if (audioRecorderRef.current && isRecording) {
+      try {
+        // Stop the current recording to get presentation transcript
+        const { blob } = await audioRecorderRef.current.stop();
+        
+        // Transcribe presentation audio
+        setQuestionsLoading(true);
+        const transcriptText = await transcribeAudio(blob);
+        setTranscript(transcriptText);
+        
+        // Extract student name and cards from transcript using LLM
+        await extractStudentInfo(transcriptText);
+        
+        // Generate questions
+        await generateQuestions(transcriptText);
+        
+        // Restart recording for question answers
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioRecorderRef.current = new AudioRecorder();
+        await audioRecorderRef.current.initialize(stream);
+        audioRecorderRef.current.start();
+        // isRecording stays true
+        
+        setStage("question-mode");
+      } catch (error) {
+        console.error("Error processing presentation:", error);
+        setIsRecording(false);
+        setStage("question-mode");
+      } finally {
+        setQuestionsLoading(false);
+      }
+    } else {
+      setStage("question-mode");
+    }
+  };
+  
+  // Extract student name and cards using LLM
+  async function extractStudentInfo(transcript: string) {
     try {
-      const res = await fetch("/api/q-judge", {
+      const response = await fetch("/api/extract-cards", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ questions: allQs, transcript, scope }),
-        signal: ac.signal,
+        body: JSON.stringify({ transcript }),
       });
-      const ct = res.headers.get("content-type") || "";
-      if (!ct.includes("application/json")) {
-        const raw = await res.text();
-        throw new Error(`Non-JSON (${res.status}): ${raw.slice(0, 200)}...`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        setStudentName(data.studentName || "Unknown Student");
+        setStudentCards(data.cards || []);
+        console.log("Extracted student info:", data);
+      } else {
+        console.error("Failed to extract student info");
+        setStudentName("Unknown Student");
+        setStudentCards([]);
       }
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
-      return typeof json.top === "string" ? json.top : "";
-    } catch (e: any) {
-      console.error("Judge error:", e?.message || e);
-      return ""; // fall back to empty (we'll handle in askFinal)
-    } finally {
-      clearTimeout(to);
+    } catch (error) {
+      console.error("Error extracting student info:", error);
+      setStudentName("Unknown Student");
+      setStudentCards([]);
     }
   }
-
-  // final: now calls judge first, then passes top-3 to q-final
-  async function askFinal(scope: "first2_5" | "full", transcript: string, allQs: string) {
-    const setLoading = scope === "first2_5" ? setFinal2p5Loading : setFinalStopLoading;
-    const setText = scope === "first2_5" ? setFinal2p5 : setFinalStop;
-
+  
+  // Transcribe audio using Whisper
+  async function transcribeAudio(audioBlob: Blob): Promise<string> {
     try {
-      setLoading(true);
-      // judge first
-      const top3 = await askJudge(allQs, transcript, scope);
-      const questionsForFinal = top3.trim() || allQs; // fallback to all if judge failed/empty
-
-      const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), 30_000);
-      try {
-        const res = await fetch("/api/q-final", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ transcript, allQuestions: questionsForFinal, scope }),
-          signal: ac.signal,
-        });
-        const ct = res.headers.get("content-type") || "";
-        if (!ct.includes("application/json")) {
-          const raw = await res.text();
-          throw new Error(`Non-JSON (${res.status}): ${raw.slice(0, 200)}...`);
-        }
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
-        const questions = typeof json.questions === "string" ? json.questions : "";
-        setText(questions);
-      } finally {
-        clearTimeout(to);
+      const formData = new FormData();
+      const audioFile = blobToFile(audioBlob, "recording.webm");
+      formData.append("audio", audioFile);
+      
+      const response = await fetch("/api/transcribe", {
+        method: "POST",
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Transcription API error:", response.status, errorText);
+        throw new Error(`Transcription failed: ${response.status}`);
       }
-    } catch (e: any) {
-      setText(`(final ${scope} error) ${e?.name === "AbortError" ? "Request timed out" : e?.message || e}`);
-    } finally {
-      setLoading(false);
+      
+      const data = await response.json();
+      return data.text || "";
+    } catch (error) {
+      console.error("Transcription error:", error);
+      // Return empty string to allow exam to continue
+      return "";
     }
   }
-
-  // ---- Start / Stop ----
-  async function start() {
-    if (connected) return;
-    setErr("");
-
-    // reset UI/state
-    setLiveText(""); setFinalText("");
-    setCheckpoints([]); setCpLoading(false);
-    setFinal2p5(""); setFinal2p5Loading(false);
-    setFinalStop(""); setFinalStopLoading(false);
-    setElapsedMs(0);
-    setDisplayTranscript("");
-
-    firstDeltaAtRef.current = null;
-    lastDeltaTsRef.current = 0;
-    liveTextRef.current = ""; finalTextRef.current = "";
-    checkpointsRef.current = []; lastCpIndexRef.current = 0;
-
-    // clear timers
-    if (cpTickerRef.current !== null) { clearInterval(cpTickerRef.current); cpTickerRef.current = null; }
-    if (final2p5TimerRef.current !== null) { clearTimeout(final2p5TimerRef.current); final2p5TimerRef.current = null; }
-    if (clockIntervalRef.current !== null) { clearInterval(clockIntervalRef.current); clockIntervalRef.current = null; }
-    if (uiRefreshIntervalRef.current !== null) { clearInterval(uiRefreshIntervalRef.current); uiRefreshIntervalRef.current = null; }
-
+  
+  // Generate questions using the dual workflow
+  async function generateQuestions(transcriptText: string) {
+    // If no transcript, use fallback questions
+    if (!transcriptText || transcriptText.trim().length === 0) {
+      console.warn("No transcript available, using fallback questions");
+      setFinalQuestions([
+        "Can you elaborate on the main concepts you presented?",
+        "How do these ideas connect to the course material?",
+        "What questions do you have about this topic?"
+      ]);
+      return;
+    }
+    
     try {
-      // 1) ephemeral token
-      const tokenRes = await fetch("/api/realtime-session");
-      const tokenJson = await tokenRes.json();
-      if (!tokenRes.ok) throw new Error(tokenJson?.error || "Failed to create session");
-      const ephemeralKey = tokenJson.client_secret?.value as string;
-
-      // 2) mic
-      const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = ms;
-
-      // 3) WebRTC
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-      for (const track of ms.getTracks()) pc.addTrack(track, ms);
-
-      const dc = pc.createDataChannel("oai-events");
-      dcRef.current = dc;
-
-      pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
-          setErr(`Connection ${pc.iceConnectionState}. Try Stop → Start.`);
-        }
-      };
-
-      dc.onmessage = (evt) => {
+      // Fetch card definitions from Airtable
+      let termDefinitions = {};
+      if (studentCards.length > 0) {
         try {
-          const msg: OAIEvent = JSON.parse(evt.data);
-          const type = String(msg?.type || "");
-          const isTranscript = type.includes("transcript") || type.includes("input_audio_transcription");
-          if (!isTranscript) {
-            if (type.startsWith("response.")) {
-              dc.send(JSON.stringify({ type: "response.cancel" }));
-              dc.send(JSON.stringify({ type: "output_audio_buffer.clear" }));
-            }
-            return;
+          const termsResponse = await fetch(`/api/airtable/terms?terms=${studentCards.join(',')}`);
+          if (termsResponse.ok) {
+            const termsData = await termsResponse.json();
+            termDefinitions = termsData.definitions || {};
+            console.log("Fetched card definitions:", termDefinitions);
           }
-
-          const t = msg?.text?.delta ?? msg?.delta ?? "";
-          if (!t) return;
-
-          const now = Date.now();
-          lastDeltaTsRef.current = now;
-
-          // On very first delta, start timers/tickers
-          if (firstDeltaAtRef.current === null) {
-            firstDeltaAtRef.current = now;
-
-            // 1s ticker for checkpoints + timer
-            cpTickerRef.current = window.setInterval(() => {
-              if (!firstDeltaAtRef.current) return;
-              const elapsed = Date.now() - firstDeltaAtRef.current;
-              setElapsedMs(elapsed); // update on-screen timer
-
-              // Determine how many 30s boundaries we’ve crossed
-              const idx = Math.floor(elapsed / CHECKPOINT_MS);
-              // Fire any missed checkpoints one by one
-              while (lastCpIndexRef.current < idx) {
-                lastCpIndexRef.current += 1;
-                const tSec = Math.round((lastCpIndexRef.current * CHECKPOINT_MS) / 1000);
-                const cumulative = snapshotTranscript();
-                if (cumulative) askCheckpointQuestions(tSec, cumulative);
-              }
-            }, 1000);
-
-            // schedule final @ 2.5 min
-            final2p5TimerRef.current = window.setTimeout(() => {
-              const snap = snapshotTranscript();
-              const allQs = gatherAllCheckpointQuestions();
-              if (snap) askFinal("first2_5", snap, allQs);
-            }, FINAL_WINDOW_MS);
-
-            // visible clock
-            clockIntervalRef.current = window.setInterval(() => {
-              if (firstDeltaAtRef.current) {
-                setElapsedMs(Date.now() - firstDeltaAtRef.current);
-              }
-            }, 250);
-
-            // 10s transcript UI refresh
-            uiRefreshIntervalRef.current = window.setInterval(() => {
-              setDisplayTranscript(snapshotTranscript());
-            }, 10_000);
-          }
-
-          // Append live
-          setLiveText((prev) => prev + t);
-          liveTextRef.current += t;
-
-          // If we get explicit completion, fold into finalized
-          const isComplete = /complete|completed|final/.test(type) || type === "response.done";
-          if (isComplete && liveTextRef.current) {
-            const chunk = liveTextRef.current.trim();
-            if (chunk) {
-              setFinalText((prev) => (prev && !prev.endsWith("\n") ? prev + "\n" : prev) + chunk + "\n");
-            }
-            setLiveText("");
-            liveTextRef.current = "";
-          }
-        } catch {
-          /* ignore keepalives */
+        } catch (error) {
+          console.error("Error fetching card definitions:", error);
         }
-      };
-
-      // 4) SDP
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      const sdpResp = await fetch(
-        "https://api.openai.com/v1/realtime?model=gpt-realtime",
-        { method: "POST", headers: { Authorization: `Bearer ${ephemeralKey}`, "Content-Type": "application/sdp" }, body: offer.sdp! }
-      );
-      if (!sdpResp.ok) throw new Error(`SDP exchange failed: ${await sdpResp.text()}`);
-      const answer = { type: "answer", sdp: await sdpResp.text() } as RTCSessionDescriptionInit;
-      await pc.setRemoteDescription(answer);
-
-      // 5) Session prefs: STT only
-      dc.onopen = () => {
-        setConnected(true);
-        dc.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            input_audio_transcription: { model: "gpt-4o-transcribe" },
-            turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 500, create_response: false },
-            instructions: "Transcribe only. Do not generate replies or audio.",
-          },
-        }));
-      };
-    } catch (e: any) {
-      console.error(e);
-      setErr(e?.message || "Unknown error starting mic/Realtime.");
-      cleanup();
+      }
+      
+      // Generate questions with card context
+      const response = await fetch("/api/q-thinking", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript: transcriptText,
+          studentTerms: studentCards,
+          termDefinitions: termDefinitions,
+          scope: "full",
+        }),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        const questions = data.questions || "";
+        
+        console.log("Raw questions from API:", questions);
+        
+        // Try multiple parsing strategies
+        let questionArray: string[] = [];
+        
+        // Strategy 1: Split by "1)", "2)", "3)"
+        if (questions.includes("1)") || questions.includes("2)")) {
+          questionArray = questions
+            .split(/\d+\)\s*/)
+            .map((q: string) => q.trim())
+            .filter((q: string) => q.length > 0)
+            .slice(0, 3);
+        }
+        
+        // Strategy 2: Split by "Question 1:", "Question 2:", etc.
+        if (questionArray.length === 0 && questions.toLowerCase().includes("question")) {
+          questionArray = questions
+            .split(/Question\s+\d+:?\s*/i)
+            .map((q: string) => q.trim())
+            .filter((q: string) => q.length > 0)
+            .slice(0, 3);
+        }
+        
+        // Strategy 3: Split by newlines (if questions are on separate lines)
+        if (questionArray.length === 0) {
+          questionArray = questions
+            .split(/\n+/)
+            .map((q: string) => q.trim())
+            .filter((q: string) => q.length > 20) // Filter out short lines
+            .slice(0, 3);
+        }
+        
+        console.log("Parsed questions:", questionArray);
+        
+        if (questionArray.length >= 3) {
+          setFinalQuestions(questionArray);
+        } else if (questionArray.length > 0) {
+          // Got some questions but not 3, pad with fallbacks
+          while (questionArray.length < 3) {
+            questionArray.push("Can you elaborate further on this topic?");
+          }
+          setFinalQuestions(questionArray);
+        } else {
+          // No questions parsed, use fallback
+          console.warn("No questions generated, using fallback");
+          setFinalQuestions([
+            "Can you elaborate on the main concepts you presented?",
+            "How do these ideas connect to the course material?",
+            "What questions do you have about this topic?"
+          ]);
+        }
+      } else {
+        // API error, use fallback
+        console.error("Question generation API failed, using fallback");
+        setFinalQuestions([
+          "Can you elaborate on the main concepts you presented?",
+          "How do these ideas connect to the course material?",
+          "What questions do you have about this topic?"
+        ]);
+      }
+    } catch (error) {
+      console.error("Question generation error:", error);
+      // Use fallback questions on error
+      setFinalQuestions([
+        "Can you elaborate on the main concepts you presented?",
+        "How do these ideas connect to the course material?",
+        "What questions do you have about this topic?"
+      ]);
     }
   }
-
-  function cleanup() {
-    if (cpTickerRef.current !== null) { clearInterval(cpTickerRef.current); cpTickerRef.current = null; }
-    if (final2p5TimerRef.current !== null) { clearTimeout(final2p5TimerRef.current); final2p5TimerRef.current = null; }
-    if (clockIntervalRef.current !== null) { clearInterval(clockIntervalRef.current); clockIntervalRef.current = null; }
-    if (uiRefreshIntervalRef.current !== null) { clearInterval(uiRefreshIntervalRef.current); uiRefreshIntervalRef.current = null; }
-    dcRef.current?.close(); pcRef.current?.close(); mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    dcRef.current = null; pcRef.current = null; mediaStreamRef.current = null;
-  }
-
-  async function stop() {
-    // finalize any live text
-    const remaining = (liveTextRef.current || "").trim();
-    if (remaining) {
-      setFinalText((prev) => (prev && !prev.endsWith("\n") ? prev + "\n" : prev) + remaining + "\n");
-      setLiveText("");
-      liveTextRef.current = "";
+  
+  // ============ TEXT-TO-SPEECH (Bot Mode) ============
+  async function speakQuestion(questionText: string) {
+    try {
+      setIsSpeaking(true);
+      
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: questionText }),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("TTS API error:", response.status, errorText);
+        throw new Error(`TTS failed: ${response.status} - ${errorText}`);
+      }
+      
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      
+      // Create or reuse audio player
+      if (!audioPlayerRef.current) {
+        audioPlayerRef.current = new Audio();
+      }
+      
+      audioPlayerRef.current.src = audioUrl;
+      audioPlayerRef.current.onended = () => {
+        setIsSpeaking(false);
+        URL.revokeObjectURL(audioUrl);
+      };
+      
+      await audioPlayerRef.current.play();
+    } catch (error) {
+      console.error("TTS error:", error);
+      setIsSpeaking(false);
+      // Show user-friendly message
+      alert("Text-to-speech is not available. Please read the question manually.");
     }
-
-    // Final on full session
-    const allQs = gatherAllCheckpointQuestions();
-    const full = snapshotTranscript();
-    if (full) await askFinal("full", full, allQs);
-
-    setConnected(false);
-    cleanup();
-    setElapsedMs(0);
-    firstDeltaAtRef.current = null;
-    lastCpIndexRef.current = 0;
-
-    setDisplayTranscript(snapshotTranscript());
   }
-
-  function formatMMSS(ms: number) {
-    const total = Math.max(0, Math.floor(ms / 1000));
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  
+  function repeatQuestion() {
+    if (questionMode === "bot" && finalQuestions[currentQuestionIndex]) {
+      speakQuestion(finalQuestions[currentQuestionIndex]);
+    }
   }
-
+  
+  // ============ SAVE TO AIRTABLE ============
+  async function saveToAirtable() {
+    try {
+      // Create array of question-answer pairs
+      const questionsWithAnswers = finalQuestions.map((question, index) => ({
+        question,
+        answer: questionAnswers[index] || ""
+      }));
+      
+      console.log("Saving to Airtable:", {
+        questions: finalQuestions,
+        answers: questionAnswers
+      });
+      
+      const response = await fetch("/api/airtable/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentName: studentName || "Unknown Student",
+          studentCards: studentCards,
+          fullTranscript: transcript,
+          questionsWithAnswers: questionsWithAnswers,
+        }),
+      });
+      
+      if (response.ok) {
+        console.log("Successfully saved to Airtable");
+      } else {
+        console.error("Failed to save to Airtable:", await response.text());
+      }
+    } catch (error) {
+      console.error("Error saving to Airtable:", error);
+    }
+  }
+  
+  // ============ STAGE 5: Select Question Mode ============
+  const selectQuestionMode = async (mode: QuestionMode) => {
+    setQuestionMode(mode);
+    setCurrentQuestionIndex(0);
+    setStage("questions");
+    
+    // If bot mode, automatically speak the first question
+    if (mode === "bot" && finalQuestions[0]) {
+      // Small delay to let the UI update
+      setTimeout(() => {
+        speakQuestion(finalQuestions[0]);
+      }, 500);
+    }
+  };
+  
+  // ============ STAGE 6: Question Timers ============
+  const startQuestionTimer = () => {
+    setQuestionTime(60);
+    
+    questionTimerRef.current = setInterval(() => {
+      setQuestionTime(prev => {
+        if (prev <= 1) {
+          if (questionTimerRef.current) clearInterval(questionTimerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+  
+  const nextQuestion = async () => {
+    if (questionTimerRef.current) clearInterval(questionTimerRef.current);
+    setQuestionTime(0);
+    
+    // Capture answer for current question before moving to next
+    await captureQuestionAnswer(currentQuestionIndex);
+    
+    if (currentQuestionIndex < finalQuestions.length - 1) {
+      const nextIndex = currentQuestionIndex + 1;
+      setCurrentQuestionIndex(nextIndex);
+      questionStartTimeRef.current = Date.now();
+      
+      // If bot mode, speak the next question
+      if (questionMode === "bot" && finalQuestions[nextIndex]) {
+        setTimeout(() => {
+          speakQuestion(finalQuestions[nextIndex]);
+        }, 500);
+      }
+    }
+  };
+  
+  // Capture answer audio for a specific question
+  const captureQuestionAnswer = async (questionIndex: number) => {
+    if (!audioRecorderRef.current || !isRecording) return;
+    
+    try {
+      // Stop current recording to get the answer
+      const { blob } = await audioRecorderRef.current.stop();
+      
+      // Transcribe the answer
+      const answerText = await transcribeAudio(blob);
+      console.log(`Answer ${questionIndex + 1}:`, answerText);
+      
+      // Store the answer
+      setQuestionAnswers(prev => {
+        const newAnswers = [...prev];
+        newAnswers[questionIndex] = answerText;
+        return newAnswers;
+      });
+      
+      // Restart recording for next question (if not the last one)
+      if (questionIndex < finalQuestions.length - 1) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioRecorderRef.current = new AudioRecorder();
+        await audioRecorderRef.current.initialize(stream);
+        audioRecorderRef.current.start();
+      }
+    } catch (error) {
+      console.error(`Error capturing answer ${questionIndex + 1}:`, error);
+    }
+  };
+  
+  // ============ PRESENTATION TIMER COLOR ============
+  const getPresentationTimerColor = () => {
+    if (presentationTime < 240) return "#ef4444"; // Red < 4min
+    if (presentationTime <= 360) return "#10b981"; // Green 4-6min
+    return "#ef4444"; // Red > 6min
+  };
+  
+  // ============ RENDER ============
   return (
-    <main style={{ padding: 24, maxWidth: 900, margin: "0 auto", fontFamily: "ui-sans-serif, system-ui" }}>
-      <h1>Transcript + Questions</h1>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <button onClick={start} disabled={connected} style={{ padding: "8px 14px" }}>
-          {connected ? "Connected" : "Start mic + transcript"}
-        </button>
-        <button onClick={stop} disabled={!connected} style={{ padding: "8px 14px" }}>
-          Stop
-        </button>
-        <div style={{
-          padding: "6px 10px",
-          border: "1px solid #ddd",
-          borderRadius: 8,
-          background: "#f9fafb",
-          fontVariantNumeric: "tabular-nums"
+    <div style={{ 
+      minHeight: "100vh", 
+      background: "#f9fafb",
+      fontFamily: "system-ui, -apple-system, sans-serif",
+      padding: "24px"
+    }}>
+      <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+        {/* ADMIN CONTROLS */}
+        <div style={{ 
+          background: "white", 
+          border: "2px solid #e5e7eb", 
+          borderRadius: 12, 
+          padding: 24,
+          marginBottom: 24
         }}>
-          ⏱️ Elapsed: <strong>{formatMMSS(elapsedMs)}</strong>
+          <div style={{ 
+            fontSize: 12, 
+            fontWeight: 600, 
+            color: "#6b7280", 
+            marginBottom: 16,
+            letterSpacing: "0.05em"
+          }}>
+            ADMIN CONTROLS
+          </div>
+          
+          {/* STAGE 1: Prep Time Selection */}
+          {stage === "prep-select" && (
+            <div>
+              <p style={{ marginBottom: 20, fontSize: 16, color: "#374151" }}>
+                When student has drawn cards and is set, pick the time:
+              </p>
+              <div style={{ display: "flex", gap: 16 }}>
+                <button
+                  onClick={() => startPrepTime(5)}
+                  style={{
+                    flex: 2,
+                    padding: "20px 32px",
+                    background: "#10b981",
+                    color: "white",
+                    border: "none",
+                    borderRadius: 8,
+                    fontSize: 20,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    boxShadow: "0 4px 6px rgba(0,0,0,0.1)"
+                  }}
+                >
+                  5 Minutes
+                </button>
+                <button
+                  onClick={() => startPrepTime(7.5)}
+                  style={{
+                    flex: 1,
+                    padding: "16px 24px",
+                    background: "#6b7280",
+                    color: "white",
+                    border: "2px dashed #9ca3af",
+                    borderRadius: 8,
+                    fontSize: 14,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                    opacity: 0.7
+                  }}
+                >
+                  7.5 Minutes<br/>
+                  <span style={{ fontSize: 11, opacity: 0.8 }}>(accommodation)</span>
+                </button>
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 2: Prep Countdown (buttons grayed out) */}
+          {stage === "prep-countdown" && (
+            <div>
+              <div style={{ display: "flex", gap: 16, opacity: 0.5, marginBottom: 16 }}>
+                <button disabled style={{
+                  flex: 2, padding: "20px 32px", background: "#d1d5db",
+                  color: "#6b7280", border: "none", borderRadius: 8,
+                  fontSize: 20, fontWeight: 600, cursor: "not-allowed"
+                }}>
+                  5 Minutes
+                </button>
+                <button disabled style={{
+                  flex: 1, padding: "16px 24px", background: "#d1d5db",
+                  color: "#6b7280", border: "none", borderRadius: 8,
+                  fontSize: 14, fontWeight: 500, cursor: "not-allowed"
+                }}>
+                  7.5 Minutes
+                </button>
+              </div>
+              <p style={{ marginBottom: 16, fontSize: 14, color: "#6b7280", textAlign: "center" }}>
+                Prep time in progress...
+              </p>
+              <button
+                onClick={skipPrepTime}
+                style={{
+                  width: "100%",
+                  padding: "16px 32px",
+                  background: "#10b981",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  fontSize: 18,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  boxShadow: "0 2px 4px rgba(0,0,0,0.1)"
+                }}
+              >
+                ✓ Student Ready
+              </button>
+            </div>
+          )}
+          
+          {/* STAGE 3: Start Recording */}
+          {stage === "recording-prompt" && (
+            <div>
+              <button
+                onClick={startRecording}
+                style={{
+                  width: "100%",
+                  padding: "20px 32px",
+                  background: "#ef4444",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  fontSize: 20,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  boxShadow: "0 4px 6px rgba(0,0,0,0.1)"
+                }}
+              >
+                🔴 Start Recording
+              </button>
+            </div>
+          )}
+          
+          {/* STAGE 4: Recording Name - Wait for student to state name */}
+          {stage === "recording-name" && (
+            <div>
+              <div style={{ 
+                textAlign: "center", 
+                padding: 24,
+                background: "#fef3c7",
+                borderRadius: 8,
+                marginBottom: 16,
+                border: "2px solid #f59e0b"
+              }}>
+                <div style={{ fontSize: 16, color: "#92400e", marginBottom: 8, fontWeight: 600 }}>
+                  🎤 Recording...
+                </div>
+                <div style={{ fontSize: 14, color: "#78350f" }}>
+                  Student is stating their name and cards
+                </div>
+              </div>
+              <button
+                onClick={startPresentationTimer}
+                style={{
+                  width: "100%",
+                  padding: "20px 32px",
+                  background: "#10b981",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  fontSize: 20,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  boxShadow: "0 4px 6px rgba(0,0,0,0.1)"
+                }}
+              >
+                ▶️ Start Timer
+              </button>
+            </div>
+          )}
+          
+          {/* STAGE 5: Presentation Timer */}
+          {stage === "presentation" && (
+            <div>
+              <div style={{ 
+                textAlign: "center", 
+                padding: 24,
+                background: "#f9fafb",
+                borderRadius: 8,
+                marginBottom: 16
+              }}>
+                <div style={{ fontSize: 14, color: "#6b7280", marginBottom: 8 }}>
+                  Recording in progress...
+                </div>
+                <div style={{ 
+                  fontSize: 48, 
+                  fontWeight: 700,
+                  color: getPresentationTimerColor(),
+                  fontFamily: "monospace"
+                }}>
+                  {formatMMSS(presentationTime * 1000)}
+                </div>
+                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 8 }}>
+                  {presentationTime < 240 && "⚠️ Under 4 minutes"}
+                  {presentationTime >= 240 && presentationTime <= 360 && "✓ Good range (4-6 min)"}
+                  {presentationTime > 360 && "⚠️ Over 6 minutes"}
+                </div>
+              </div>
+              <button
+                onClick={stopPresentation}
+                style={{
+                  width: "100%",
+                  padding: "16px 32px",
+                  background: "#1f2937",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  cursor: "pointer"
+                }}
+              >
+                Stop Recording & Generate Questions
+              </button>
+            </div>
+          )}
+          
+          {/* STAGE 5: Question Mode Selection */}
+          {stage === "question-mode" && (
+            <div>
+              {questionsLoading ? (
+                <div style={{ textAlign: "center", padding: "40px 20px" }}>
+                  <div style={{
+                    width: 60,
+                    height: 60,
+                    border: "6px solid #e5e7eb",
+                    borderTop: "6px solid #3b82f6",
+                    borderRadius: "50%",
+                    margin: "0 auto 20px",
+                    animation: "spin 1s linear infinite"
+                  }} />
+                  <p style={{ fontSize: 18, color: "#374151", fontWeight: 600, marginBottom: 8 }}>
+                    Generating Questions...
+                  </p>
+                  <p style={{ fontSize: 14, color: "#6b7280" }}>
+                    Analyzing transcript and creating follow-up questions
+                  </p>
+                  <style>{`
+                    @keyframes spin {
+                      0% { transform: rotate(0deg); }
+                      100% { transform: rotate(360deg); }
+                    }
+                  `}</style>
+                </div>
+              ) : (
+                <>
+                  <p style={{ marginBottom: 20, fontSize: 16, color: "#374151", textAlign: "center" }}>
+                    Select question mode:
+                  </p>
+                  <div style={{ display: "flex", gap: 16 }}>
+                    <button
+                      onClick={() => selectQuestionMode("human")}
+                      style={{
+                        flex: 1,
+                        padding: "20px 32px",
+                        background: "#3b82f6",
+                        color: "white",
+                        border: "none",
+                        borderRadius: 8,
+                        fontSize: 20,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        boxShadow: "0 4px 6px rgba(0,0,0,0.1)"
+                      }}
+                    >
+                      👤 Human
+                    </button>
+                    <button
+                      onClick={() => selectQuestionMode("bot")}
+                      style={{
+                        flex: 1,
+                        padding: "20px 32px",
+                        background: "#8b5cf6",
+                        color: "white",
+                        border: "none",
+                        borderRadius: 8,
+                        fontSize: 20,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        boxShadow: "0 4px 6px rgba(0,0,0,0.1)"
+                      }}
+                    >
+                      🤖 Bot
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          
+          {/* STAGE 6: Question Display & Timer */}
+          {stage === "questions" && (
+            <div>
+              {/* Recording indicator */}
+              {isRecording && (
+                <div style={{
+                  background: "#fef2f2",
+                  border: "2px solid #ef4444",
+                  borderRadius: 8,
+                  padding: 12,
+                  marginBottom: 16,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8
+                }}>
+                  <div style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    background: "#ef4444",
+                    animation: "pulse 2s infinite"
+                  }} />
+                  <div style={{ fontSize: 14, color: "#991b1b", fontWeight: 600 }}>
+                    🎤 Recording student answer...
+                  </div>
+                </div>
+              )}
+              
+              <div style={{ 
+                background: "#f0fdf4",
+                border: "2px solid #10b981",
+                borderRadius: 8,
+                padding: 24,
+                marginBottom: 16
+              }}>
+                <div style={{ fontSize: 14, color: "#059669", marginBottom: 12, fontWeight: 600 }}>
+                  Question {currentQuestionIndex + 1} of {finalQuestions.length}
+                </div>
+                <div style={{ fontSize: 18, color: "#064e3b", lineHeight: 1.6 }}>
+                  {finalQuestions[currentQuestionIndex]}
+                </div>
+              </div>
+              
+              {/* Timer display */}
+              {questionTime > 0 && (
+                <div style={{ 
+                  textAlign: "center",
+                  fontSize: 64,
+                  fontWeight: 700,
+                  color: questionTime <= 10 ? "#ef4444" : "#10b981",
+                  fontFamily: "monospace",
+                  marginBottom: 16
+                }}>
+                  {questionTime}s
+                </div>
+              )}
+              
+              {/* Control buttons */}
+              <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+                {questionTime === 0 && (
+                  <button
+                    onClick={startQuestionTimer}
+                    style={{
+                      flex: 1,
+                      padding: "16px 32px",
+                      background: "#10b981",
+                      color: "white",
+                      border: "none",
+                      borderRadius: 8,
+                      fontSize: 18,
+                      fontWeight: 600,
+                      cursor: "pointer"
+                    }}
+                  >
+                    ⏱️ Start Timer
+                  </button>
+                )}
+                
+                {currentQuestionIndex < finalQuestions.length - 1 ? (
+                  <button
+                    onClick={nextQuestion}
+                    style={{
+                      flex: 1,
+                      padding: "16px 32px",
+                      background: "#3b82f6",
+                      color: "white",
+                      border: "none",
+                      borderRadius: 8,
+                      fontSize: 16,
+                      fontWeight: 600,
+                      cursor: "pointer"
+                    }}
+                  >
+                    Next Question →
+                  </button>
+                ) : (
+                  <button
+                    onClick={async () => {
+                      // Capture final answer before ending
+                      await captureQuestionAnswer(currentQuestionIndex);
+                      // Stop recording completely
+                      if (audioRecorderRef.current && isRecording) {
+                        audioRecorderRef.current.stop();
+                        setIsRecording(false);
+                      }
+                      // Save everything to Airtable
+                      await saveToAirtable();
+                      setStage("complete");
+                    }}
+                    style={{
+                      flex: 1,
+                      padding: "16px 32px",
+                      background: "#10b981",
+                      color: "white",
+                      border: "none",
+                      borderRadius: 8,
+                      fontSize: 16,
+                      fontWeight: 600,
+                      cursor: "pointer"
+                    }}
+                  >
+                    ✓ End Exam
+                  </button>
+                )}
+                
+                {/* Repeat Question button (only in bot mode) */}
+                {questionMode === "bot" && (
+                  <button
+                    onClick={repeatQuestion}
+                    disabled={isSpeaking}
+                    style={{
+                      padding: "16px 24px",
+                      background: isSpeaking ? "#d1d5db" : "#8b5cf6",
+                      color: "white",
+                      border: "none",
+                      borderRadius: 8,
+                      fontSize: 16,
+                      fontWeight: 600,
+                      cursor: isSpeaking ? "not-allowed" : "pointer",
+                      whiteSpace: "nowrap",
+                      opacity: isSpeaking ? 0.6 : 1
+                    }}
+                  >
+                    {isSpeaking ? "🔊 Speaking..." : "🔁 Repeat Question"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 7: Complete */}
+          {stage === "complete" && (
+            <div style={{ textAlign: "center", padding: "40px" }}>
+              <div style={{ 
+                fontSize: 24, 
+                color: "#10b981", 
+                fontWeight: 600,
+                marginBottom: 20
+              }}>
+                ✅ Exam Complete!
+              </div>
+              <div style={{ fontSize: 16, color: "#6b7280", marginBottom: 24 }}>
+                The student has finished all questions.
+              </div>
+              <button
+                onClick={() => window.location.reload()}
+                style={{
+                  padding: "16px 32px",
+                  background: "#3b82f6",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  cursor: "pointer"
+                }}
+              >
+                Start New Exam
+              </button>
+            </div>
+          )}
+        </div>
+        
+        {/* STUDENT VIEW (What student sees) */}
+        <div style={{ 
+          background: "white", 
+          border: "4px solid #10b981", 
+          borderRadius: 12, 
+          padding: 32,
+          minHeight: 400
+        }}>
+          <div style={{ 
+            fontSize: 12, 
+            fontWeight: 600, 
+            color: "#10b981", 
+            marginBottom: 24,
+            letterSpacing: "0.05em"
+          }}>
+            STUDENT VIEW
+          </div>
+          
+          {/* STAGE 1: Draw Cards Instruction */}
+          {stage === "prep-select" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ fontSize: 24, color: "#1f2937", lineHeight: 1.6 }}>
+                Draw <strong>four (4) cards</strong> from each of the three stacks in front of you.
+              </div>
+              <div style={{ fontSize: 20, color: "#6b7280", marginTop: 20, lineHeight: 1.6 }}>
+                You may use the paper and pencil for notes as you prepare for your oral presentation.
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 2: Prep Countdown */}
+          {stage === "prep-countdown" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ fontSize: 18, color: "#6b7280", marginBottom: 20 }}>
+                Preparation Time
+              </div>
+              <div style={{ 
+                fontSize: 96, 
+                fontWeight: 700,
+                color: "#10b981",
+                fontFamily: "monospace"
+              }}>
+                {formatMMSS(prepTimeRemaining * 1000)}
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 3: Recording Prompt - Wait for admin to start */}
+          {stage === "recording-prompt" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ fontSize: 24, color: "#6b7280", fontStyle: "italic" }}>
+                Waiting for proctor to start recording...
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 4: Recording Name - State name and cards */}
+          {stage === "recording-name" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ 
+                fontSize: 32, 
+                color: "#1f2937", 
+                fontWeight: 600, 
+                marginBottom: 20 
+              }}>
+                State your name and your selected cards.
+              </div>
+              <div style={{ 
+                fontSize: 18, 
+                color: "#6b7280",
+                marginTop: 24
+              }}>
+                🎤 Recording...
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 5: Presentation Timer */}
+          {stage === "presentation" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ 
+                fontSize: 120, 
+                fontWeight: 700,
+                color: getPresentationTimerColor(),
+                fontFamily: "monospace"
+              }}>
+                {formatMMSS(presentationTime * 1000)}
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 5: Follow-up Question Time */}
+          {stage === "question-mode" && (
+            <div style={{ textAlign: "center", padding: "60px 40px" }}>
+              <div style={{ fontSize: 28, color: "#1f2937", fontWeight: 600, marginBottom: 16 }}>
+                Follow-up Question Time!
+              </div>
+              <div style={{ fontSize: 20, color: "#6b7280", lineHeight: 1.6 }}>
+                You'll have a minute for each question, but you can end anytime.
+              </div>
+            </div>
+          )}
+          
+          {/* STAGE 6: Question Display */}
+          {stage === "questions" && (
+            <div style={{ textAlign: "center", padding: "80px 40px" }}>
+              <div style={{ 
+                fontSize: 48, 
+                color: "#1f2937", 
+                fontWeight: 600,
+                marginBottom: 40
+              }}>
+                Question {currentQuestionIndex + 1}
+              </div>
+              
+              {questionTime > 0 && (
+                <div style={{ 
+                  fontSize: 96,
+                  fontWeight: 700,
+                  color: questionTime <= 10 ? "#ef4444" : "#10b981",
+                  fontFamily: "monospace"
+                }}>
+                  {questionTime}s
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* STAGE 7: Complete */}
+          {stage === "complete" && (
+            <div style={{ textAlign: "center", padding: "80px 40px" }}>
+              <div style={{ 
+                fontSize: 64, 
+                marginBottom: 24
+              }}>
+                🎉
+              </div>
+              <div style={{ 
+                fontSize: 48, 
+                color: "#10b981", 
+                fontWeight: 700,
+                marginBottom: 20
+              }}>
+                Congratulations!
+              </div>
+              <div style={{ 
+                fontSize: 28, 
+                color: "#1f2937",
+                lineHeight: 1.6
+              }}>
+                You're done!
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {err && (
-        <div style={{ marginBottom: 12, padding: 12, border: "1px solid #f99", borderRadius: 8, background: "#fff5f5" }}>
-          <strong>Error:</strong> {err}
-        </div>
-      )}
-
-      {/* Checkpoint questions */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 8 }}>
-          Checkpoint questions (every 30s) {cpLoading ? <em style={{ marginLeft: 8 }}>(fetching…)</em> : null}
-        </div>
-        {checkpoints.length === 0 ? (
-          <p style={{ margin: 0 }}>—</p>
-        ) : (
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {checkpoints.map((cp, i) => (
-              <li key={i} style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>
-                  T+{Math.round(cp.tSec / 30) * 30}s
-                </div>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{cp.questions}</pre>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Final at 2.5 minutes */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Final questions (first 2.5 minutes)</div>
-        {final2p5Loading ? (
-          <em>Generating…</em>
-        ) : (
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{final2p5 || "—"}</pre>
-        )}
-      </section>
-
-      {/* Final at Stop */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Final questions (full session on Stop)</div>
-        {finalStopLoading ? (
-          <em>Generating…</em>
-        ) : (
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "word-break" as any }}>{finalStop || "—"}</pre>
-        )}
-      </section>
-
-      {/* Full transcript (auto-refreshed every 10s) */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Full transcript</div>
-        <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{displayTranscript}</pre>
-      </section>
-    </main>
+    </div>
   );
 }
