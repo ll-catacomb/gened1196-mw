@@ -126,8 +126,11 @@ export default function Home() {
         // Stop the current recording to get presentation transcript
         const { blob } = await audioRecorderRef.current.stop();
         
-        // Transcribe presentation audio
+        // Change stage immediately and show loading spinner
         setQuestionsLoading(true);
+        setStage("question-mode");
+        
+        // Transcribe presentation audio
         const transcriptText = await transcribeAudio(blob);
         setTranscript(transcriptText);
         
@@ -137,20 +140,19 @@ export default function Home() {
         // Generate questions
         await generateQuestions(transcriptText);
         
+        // Questions are ready, stop loading
+        setQuestionsLoading(false);
+        
         // Restart recording for question answers
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioRecorderRef.current = new AudioRecorder();
         await audioRecorderRef.current.initialize(stream);
         audioRecorderRef.current.start();
         // isRecording stays true
-        
-        setStage("question-mode");
       } catch (error) {
         console.error("Error processing presentation:", error);
-        setIsRecording(false);
-        setStage("question-mode");
-      } finally {
         setQuestionsLoading(false);
+        setIsRecording(false);
       }
     } else {
       setStage("question-mode");
