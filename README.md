@@ -13,33 +13,32 @@ This system provides a complete workflow for oral exams:
 
 ## Key Features
 
-### 🎯 Dual-Screen Interface
+### Dual-Screen Interface
 - **Admin Controls**: Manage exam flow, timers, and controls
 - **Student View**: Clean display with prompts and timers
 - Designed for projection or dual-monitor setup
 
-### 🎤 Audio Recording & Transcription
+### Audio Recording & Transcription
 - Browser-based audio recording
 - OpenAI Whisper transcription
 - Automatic question generation from presentation
 
-### 🤖 AI-Powered Questions
-- **Dual Workflow System**: Combines recording analysis with real-time insights
+### AI-Generated Questions
+- **Dual Workflow System**: Combines recording analysis with real-time api
 - **Pedagogically Designed**: Scaffolding questions (Q1-2) + stretch goal (Q3)
 - **Context-Aware**: Uses student's selected cards and course syllabus
 - **Final Judge**: Synthesizes best questions from multiple approaches
 
-### 🔊 Text-to-Speech (Bot Mode)
+### Text-to-Speech (Bot Mode)
 - ElevenLabs integration for natural voice
 - Auto-reads questions in bot mode
 - Repeat question button for clarity
 
-### 💾 Airtable Integration
+### Airtable Integration
 - Stores card definitions
 - Saves transcripts and questions
-- Enables longitudinal analysis
 
-### ⏱️ Smart Timers
+### Timers
 - Prep countdown (5min or 7.5min with accommodation)
 - Presentation timer with color coding:
   - 🔴 Red: < 4:00 or > 6:00
