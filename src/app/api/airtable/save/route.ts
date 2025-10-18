@@ -24,13 +24,24 @@ export async function POST(req: Request) {
     }
 
     // Save to Transcripts table
+    const cardsString = Array.isArray(studentCards) ? studentCards.join(", ") : (typeof studentCards === 'string' ? studentCards : "");
+    
+    console.log("Preparing transcript data:", {
+      studentName,
+      studentCards,
+      cardsString,
+      isArray: Array.isArray(studentCards)
+    });
+    
     const transcriptData: AirtableTranscript["fields"] = {
       transcript: fullTranscript,
       student_name: studentName,
-      cards: Array.isArray(studentCards) ? studentCards.join(", ") : "", // Comma-separated card names
+      cards: cardsString, // Comma-separated card names
       timestamp: new Date().toISOString(),
       final_questions: questionsWithAnswers ? questionsWithAnswers.map((qa: any) => qa.question).join("\n\n") : "",
     };
+    
+    console.log("Saving transcript to Airtable:", transcriptData);
 
     const transcriptResult = await saveTranscriptToAirtable(transcriptData);
 
@@ -39,6 +50,29 @@ export async function POST(req: Request) {
         { error: "Failed to save transcript to Airtable" },
         { status: 500 }
       );
+    }
+
+    // Generate rationales for questions (async, after questions are formulated)
+    let rationales: string[] = [];
+    try {
+      const rationaleResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/question-rationale`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          questions: questionsWithAnswers?.map((qa: any) => qa.question) || [],
+          transcript: fullTranscript,
+          cards: studentCards
+        }),
+      });
+      
+      if (rationaleResponse.ok) {
+        const rationaleData = await rationaleResponse.json();
+        rationales = rationaleData.rationales || [];
+        console.log("Generated rationales:", rationales);
+      }
+    } catch (error) {
+      console.error("Error generating rationales:", error);
+      // Continue without rationales if generation fails
     }
 
     // Save questions with answers to Questions table
@@ -57,9 +91,10 @@ export async function POST(req: Request) {
           text: qa.question,
           answer: qa.answer || "", // NEW: Include the answer
           generated_at: now,
-          workflow: "judge", // Now safe as Long text field
+          workflow: "transcription", // Questions generated from full transcript processing
           selected_final: true,
           card_tags: Array.isArray(studentCards) ? studentCards.join(", ") : "", // Convert to comma-separated string
+          judge_rationale: rationales[i] || "", // Add rationale if available
         };
         
         console.log(`Saving question ${i + 1}:`, questionData);

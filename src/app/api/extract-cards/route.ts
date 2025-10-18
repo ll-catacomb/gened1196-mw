@@ -34,35 +34,29 @@ export async function POST(req: Request) {
         messages: [
           {
             role: "system",
-            content: `You are a helpful assistant that extracts student information from oral exam transcripts.
-The student states their name followed by 3-6 card/term names at the beginning of their presentation.
-Extract the student's full name and the list of card names they mentioned.
-Return ONLY valid JSON with this exact format:
-{
-  "studentName": "First Last",
-  "cards": ["Card1", "Card2", "Card3"]
-}
+            content: `You extract student information from oral exam transcripts.
 
-IMPORTANT: Match card names to these exact terms (fix transcription errors):
-- Folklore
-- Triviality
-- Barrier
-- Domestic Crafts (NOT "domestic graphs")
-- Worldview
-- Identity Statement
-- Honor Pledge
-- Murder Ballads (NOT "rubber ballots")
-- Harvard Lore
-- Waulking Songs (NOT "walking songs")
-- Child Ballads
-- Taylor Swift
+The student says: "My name is [Name], and my cards are [Card1], [Card2], [Card3]..."
 
-Fix transcription errors to match the correct card names above.`
+Your job:
+1. Find the student's full name
+2. Find the card names they list (usually 3-6 cards)
+3. Return ONLY a simple JSON object with two fields
+
+VALID CARD NAMES (fix transcription errors to match these):
+Folklore, Triviality, Barrier, Domestic Crafts, Worldview, Identity Statement, Honor Pledge, Murder Ballads, Harvard Lore, Waulking Songs, Child Ballads, Taylor Swift, Structuralism, Transmission, Ethnopoetics, Twin Laws, Esoteric-Exoteric Factor, Jokes, Cards, Ethnography, Shanty Talk, Folk Group, Black Ash Basket Making, Digital Folklore, Authenticity, Genre, Decorated Mortarboards, Meshworks
+
+CRITICAL: Look at what the student actually says after "my cards are" and extract those card names!
+
+Return this exact format with NO markdown, NO code blocks:
+{"studentName": "Full Name", "cardString": "Card1, Card2, Card3"}`,
           },
           {
             role: "user",
-            content: `Extract the student name and card names from this transcript:\n\n${transcript.substring(0, 500)}`
-          }
+            content: `Transcript: "${transcript.substring(0, 500)}"
+
+Extract the student name and cards. Return JSON only.`,
+          },
         ],
         temperature: 0.3,
         max_tokens: 200,
@@ -79,14 +73,38 @@ Fix transcription errors to match the correct card names above.`
     }
 
     const data = await response.json();
-    const content = data.choices[0]?.message?.content || "{}";
+    let content = data.choices[0]?.message?.content || "{}";
+    
+    console.log("Raw LLM response:", content);
+    
+    // Remove markdown code blocks if present
+    content = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     
     // Parse the JSON response
-    const extracted = JSON.parse(content);
+    let extracted;
+    try {
+      extracted = JSON.parse(content);
+    } catch (parseError) {
+      console.error("Failed to parse extraction response:", content);
+      return NextResponse.json({
+        studentName: "Unknown Student",
+        cards: []
+      });
+    }
+    
+    console.log("Extracted data:", extracted);
+    
+    // Convert cardString to array
+    let cardsArray = [];
+    if (extracted.cardString && typeof extracted.cardString === 'string') {
+      cardsArray = extracted.cardString.split(',').map((c: string) => c.trim()).filter((c: string) => c.length > 0);
+    } else if (extracted.cards && Array.isArray(extracted.cards)) {
+      cardsArray = extracted.cards;
+    }
     
     return NextResponse.json({
       studentName: extracted.studentName || "Unknown Student",
-      cards: extracted.cards || []
+      cards: cardsArray
     });
   } catch (error: any) {
     console.error("Error extracting student info:", error);

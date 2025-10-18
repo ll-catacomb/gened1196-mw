@@ -375,7 +375,17 @@ export default function Home() {
   }
   
   // ============ SAVE TO AIRTABLE ============
+  const [isSaving, setIsSaving] = useState(false);
+  
   async function saveToAirtable() {
+    // Prevent duplicate saves
+    if (isSaving) {
+      console.log("Already saving, skipping duplicate call");
+      return;
+    }
+    
+    setIsSaving(true);
+    
     try {
       // Create array of question-answer pairs
       const questionsWithAnswers = finalQuestions.map((question, index) => ({
@@ -384,6 +394,8 @@ export default function Home() {
       }));
       
       console.log("Saving to Airtable:", {
+        studentName,
+        studentCards,
         questions: finalQuestions,
         answers: questionAnswers
       });
@@ -406,6 +418,8 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Error saving to Airtable:", error);
+    } finally {
+      setIsSaving(false);
     }
   }
   
@@ -461,8 +475,8 @@ export default function Home() {
   };
   
   // Capture answer audio for a specific question
-  const captureQuestionAnswer = async (questionIndex: number) => {
-    if (!audioRecorderRef.current || !isRecording) return;
+  const captureQuestionAnswer = async (questionIndex: number): Promise<string> => {
+    if (!audioRecorderRef.current || !isRecording) return "";
     
     try {
       // Stop current recording to get the answer
@@ -486,8 +500,11 @@ export default function Home() {
         await audioRecorderRef.current.initialize(stream);
         audioRecorderRef.current.start();
       }
+      
+      return answerText;
     } catch (error) {
       console.error(`Error capturing answer ${questionIndex + 1}:`, error);
+      return "";
     }
   };
   
@@ -892,13 +909,20 @@ export default function Home() {
                   <button
                     onClick={async () => {
                       // Capture final answer before ending
-                      await captureQuestionAnswer(currentQuestionIndex);
-                      // Stop recording completely
-                      if (audioRecorderRef.current && isRecording) {
-                        audioRecorderRef.current.stop();
-                        setIsRecording(false);
-                      }
-                      // Save everything to Airtable
+                      const finalAnswer = await captureQuestionAnswer(currentQuestionIndex);
+                      
+                      // Update the answers array with the final answer
+                      const updatedAnswers = [...questionAnswers];
+                      updatedAnswers[currentQuestionIndex] = finalAnswer;
+                      setQuestionAnswers(updatedAnswers);
+                      
+                      // Stop recording completely (already stopped in captureQuestionAnswer)
+                      setIsRecording(false);
+                      
+                      // Small delay to ensure state updates
+                      await new Promise(resolve => setTimeout(resolve, 100));
+                      
+                      // Save everything to Airtable with updated answers
                       await saveToAirtable();
                       setStage("complete");
                     }}

@@ -98,9 +98,11 @@ export async function POST(req: Request) {
                 content: `You are a rigorous professor evaluating a student's oral exam presentation. Your task is to generate EXACTLY THREE follow-up questions that help the student demonstrate their understanding and align with the grading rubric.
 
 QUESTION STRATEGY:
-1. Questions 1-2 should be SCAFFOLDING questions that help the student align with the rubric. If the student understands a concept but failed to mention key authors, specific terminology, or important details (perhaps due to nerves), these questions should provide a platform for them to elaborate. These should NOT give away answers but should feel like opportunities to demonstrate knowledge.
+1. Questions 1-2 should be SCAFFOLDING questions that help the student align with the rubric. If the student understands a concept but failed to articulate key ideas, specific terminology, or important details (perhaps due to nerves), these questions should provide a platform for them to elaborate. These should NOT give away answers but should feel like opportunities to demonstrate knowledge.
 
 2. Question 3 should be a STRETCH GOAL - more challenging but in the area where the student showed the most competence. This should allow them to go deeper and demonstrate advanced understanding, aligned with the rubric and syllabus.
+
+CRITICAL: DO NOT mention specific scholars or authors by name UNLESS they are absolutely foundational to the field (e.g., Claude Lévi-Strauss, Clifford Geertz). For niche topics or specialized cards, avoid citing obscure scholars the student may not have encountered. Focus on concepts, frameworks, and theoretical approaches rather than names.
 
 Return ONLY three questions, one per line, no numbering or preamble.`,
               },
@@ -118,8 +120,10 @@ TRANSCRIPT (${label}):
 ${transcript}
 
 TASK: Generate EXACTLY three follow-up questions following the strategy:
-- Q1-2: Scaffolding questions that help the student demonstrate knowledge they may have but didn't fully articulate. Look for gaps where they understand concepts but missed naming key authors, specific examples, or important terminology. These should feel supportive but not give away answers.
+- Q1-2: Scaffolding questions that help the student demonstrate knowledge they may have but didn't fully articulate. Look for gaps where they understand concepts but missed specific examples, important terminology, or theoretical connections. These should feel supportive but not give away answers.
 - Q3: A stretch goal in their strongest area - challenge them to go deeper where they showed competence.
+
+REMEMBER: Avoid mentioning obscure scholars by name. Focus on concepts, frameworks, and theoretical approaches.
 
 Return ONLY the three questions, one per line, no numbering.`,
               },
