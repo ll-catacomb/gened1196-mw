@@ -281,28 +281,47 @@ export default function Home() {
         body: JSON.stringify({ transcript }),
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        const studentName = data.studentName || "Unknown Student";
-        const cards = data.cards || [];
-
-        setStudentName(studentName);
-        setStudentCards(cards);
-
-        console.log("Extracted student info (structured):", { studentName, cards });
-
-        return { studentName, cards };
-      } else {
-        console.error("Failed to extract student info");
-        setStudentName("Unknown Student");
-        setStudentCards([]);
-        return { studentName: "Unknown Student", cards: [] };
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error("Failed to extract student info", response.status, errorBody);
+        throw new Error(`Extraction API returned ${response.status}`);
       }
-    } catch (error) {
-      console.error("Error extracting student info:", error);
-      setStudentName("Unknown Student");
-      setStudentCards([]);
-      return { studentName: "Unknown Student", cards: [] };
+
+      const data = await response.json();
+      const studentName = data.studentName || "Unknown Student";
+      const cards = Array.isArray(data.cards) ? data.cards : [];
+
+      setStudentName(studentName);
+      setStudentCards(cards);
+
+      console.log("Extracted student info (structured):", { studentName, cards });
+
+      return { studentName, cards };
+    } catch (error: any) {
+      console.error("Error extracting student info:", error?.message || error);
+
+      let fallbackName = "Unknown Student";
+      setStudentName((prev) => {
+        if (prev && prev.trim().length > 0) {
+          fallbackName = prev;
+          return prev;
+        }
+        return fallbackName;
+      });
+
+      let fallbackCards: string[] = [];
+      setStudentCards((prev) => {
+        if (Array.isArray(prev) && prev.length > 0) {
+          fallbackCards = prev;
+          return prev;
+        }
+        return [];
+      });
+
+      return {
+        studentName: fallbackName,
+        cards: fallbackCards,
+      };
     }
   }
 
