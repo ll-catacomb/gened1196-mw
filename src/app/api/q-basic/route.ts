@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MODELS, TIMEOUTS } from "@/config/constants";
 import type { BasicQuestionRequest, BasicQuestionResponse } from "@/types";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 export async function POST(req: Request) {
   try {
@@ -12,13 +13,8 @@ export async function POST(req: Request) {
     const ac = new AbortController();
     const timeout = setTimeout(() => ac.abort(), TIMEOUTS.CHECKPOINT_QUESTIONS);
     try {
-      const r = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const r = await callChatCompletion(
+        {
           model: MODELS.CHAT,
           messages: [
             {
@@ -34,9 +30,10 @@ export async function POST(req: Request) {
                 `\n\nReturn ONLY three short, basic, on-topic follow-up questions, each on its own line.`,
             },
           ],
-        }),
-        signal: ac.signal,
-      });
+        },
+        "/chat/completions",
+        { signal: ac.signal }
+      );
 
       if (!r.ok) return NextResponse.json({ error: await r.text() }, { status: r.status });
       const data = await r.json();

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 /**
  * POST /api/question-rationale - Generate metacognitive rationale for why questions were formulated
@@ -14,27 +15,13 @@ export async function POST(req: Request) {
       );
     }
 
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) {
-      return NextResponse.json(
-        { error: "OpenAI API key not configured" },
-        { status: 500 }
-      );
-    }
-
     // Generate rationale for all questions
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are an expert pedagogue analyzing why specific follow-up questions were formulated for an oral exam.
+    const response = await callChatCompletion({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert pedagogue analyzing why specific follow-up questions were formulated for an oral exam.
 
 Your task is to provide metacognitive reasoning explaining the pedagogical intent behind each question.
 
@@ -51,7 +38,7 @@ Format: ["Rationale for Q1", "Rationale for Q2", "Rationale for Q3"]`
           },
           {
             role: "user",
-            content: `Student's cards: ${cards.join(", ")}
+            content: `Student's cards: ${(cards || []).join(", ")}
 
 Transcript excerpt: ${transcript.substring(0, 800)}
 
@@ -63,7 +50,6 @@ Provide metacognitive rationale for why each question was formulated.`
         ],
         temperature: 0.5,
         max_tokens: 500,
-      }),
     });
 
     if (!response.ok) {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 /**
  * POST /api/extract-cards - Use LLM to extract student name and card names from transcript
@@ -14,27 +15,13 @@ export async function POST(req: Request) {
       );
     }
 
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) {
-      return NextResponse.json(
-        { error: "OpenAI API key not configured" },
-        { status: 500 }
-      );
-    }
-
     // Use GPT to extract structured data
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You extract student information from oral exam transcripts.
+    const response = await callChatCompletion({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You extract student information from oral exam transcripts.
 
 The student says: "My name is [Name], and my cards are [Card1], [Card2], [Card3]..."
 
@@ -56,11 +43,10 @@ Return this exact format with NO markdown, NO code blocks:
             content: `Transcript: "${transcript.substring(0, 500)}"
 
 Extract the student name and cards. Return JSON only.`,
-          },
-        ],
-        temperature: 0.3,
-        max_tokens: 200,
-      }),
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 200,
     });
 
     if (!response.ok) {

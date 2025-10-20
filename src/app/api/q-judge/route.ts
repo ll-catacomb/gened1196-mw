@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MODELS, TIMEOUTS } from "@/config/constants";
 import type { JudgeRequest, JudgeResponse } from "@/types";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 export async function POST(req: Request) {
   try {
@@ -28,13 +29,8 @@ export async function POST(req: Request) {
     const timeout = setTimeout(() => ac.abort(), TIMEOUTS.JUDGE);
 
     try {
-      const r = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const r = await callChatCompletion(
+        {
           model: MODELS.CHAT,
           messages: [
             {
@@ -51,9 +47,10 @@ export async function POST(req: Request) {
                 `TASK: Return ONLY three questions from the list above, verbatim, one per line.`,
             },
           ],
-        }),
-        signal: ac.signal,
-      });
+        },
+        "/chat/completions",
+        { signal: ac.signal }
+      );
 
       if (!r.ok) {
         const msg = await r.text();

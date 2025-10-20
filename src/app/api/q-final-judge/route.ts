@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MODELS, TIMEOUTS } from "@/config/constants";
 import type { FinalJudgeRequest, FinalJudgeResponse } from "@/types";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 const SYLLABUS = `
 Course Goals
@@ -54,20 +55,13 @@ export async function POST(req: Request) {
     const timeout = setTimeout(() => ac.abort(), TIMEOUTS.FINAL_QUESTIONS);
 
     try {
-      const response = await fetch(
-        "https://api.openai.com/v1/chat/completions",
+      const response = await callChatCompletion(
         {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: MODELS.THINKING,
-            messages: [
-              {
-                role: "system",
-                content: `You are a master educator synthesizing insights from two different question-generation approaches (real-time and recording-based) to produce the optimal final three questions for a student's oral exam.
+          model: MODELS.THINKING,
+          messages: [
+            {
+              role: "system",
+              content: `You are a master educator synthesizing insights from two different question-generation approaches (real-time and recording-based) to produce the optimal final three questions for a student's oral exam.
 
 CRITICAL QUESTION STRATEGY:
 Your final three questions must follow this precise structure:
@@ -123,11 +117,11 @@ TASK: Synthesize the best insights from both question sets to produce EXACTLY TH
 These questions should work together as a cohesive set to help the student demonstrate their full understanding.
 
 Return ONLY the three final questions, one per line, no numbering or preamble.`,
-              },
-            ],
-          }),
-          signal: ac.signal,
-        }
+            },
+          ],
+        },
+        "/chat/completions",
+        { signal: ac.signal }
       );
 
       if (!response.ok) {

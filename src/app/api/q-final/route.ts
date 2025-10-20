@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MODELS, TIMEOUTS } from "@/config/constants";
 import type { FinalQuestionRequest, FinalQuestionResponse } from "@/types";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 // Embed the syllabus server-side so you don't ship it from the client each time.
 const SYLLABUS = `
@@ -76,13 +77,8 @@ export async function POST(req: Request) {
     const timeout = setTimeout(() => ac.abort(), TIMEOUTS.FINAL_QUESTIONS);
 
     try {
-      const r = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const r = await callChatCompletion(
+        {
           model: MODELS.CHAT,
           messages: [
             {
@@ -104,9 +100,10 @@ export async function POST(req: Request) {
                 `- are not yes/no; each on its own line with no numbering or extra text.`,
             },
           ],
-        }),
-        signal: ac.signal,
-      });
+        },
+        "/chat/completions",
+        { signal: ac.signal }
+      );
 
       if (!r.ok) return NextResponse.json({ error: await r.text() }, { status: r.status });
       const data = await r.json();

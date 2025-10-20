@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MODELS, TIMEOUTS } from "@/config/constants";
 import type { ThinkingQuestionRequest, ThinkingQuestionResponse } from "@/types";
+import { callChatCompletion } from "@/lib/huitOpenAI";
 
 // Embed the syllabus server-side
 const SYLLABUS = `
@@ -82,27 +83,24 @@ export async function POST(req: Request) {
     const timeout = setTimeout(() => ac.abort(), TIMEOUTS.FINAL_QUESTIONS);
 
     try {
-      const response = await fetch(
-        "https://api.openai.com/v1/chat/completions",
+      const response = await callChatCompletion(
         {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: MODELS.THINKING,
-            messages: [
-              {
-                role: "system",
-                content: `You are a rigorous professor evaluating a student's oral exam presentation. Your task is to generate EXACTLY THREE follow-up questions that help the student demonstrate their understanding and align with the grading rubric.
+          model: MODELS.THINKING,
+          messages: [
+            {
+              role: "system",
+              content: `You are a rigorous professor evaluating a student's oral exam presentation. Generate EXACTLY THREE follow-up questions that stay within a 60-second answer window and keep the student talking.
 
 QUESTION STRATEGY:
-1. Questions 1-2 should be SCAFFOLDING questions that help the student align with the rubric. If the student understands a concept but failed to articulate key ideas, specific terminology, or important details (perhaps due to nerves), these questions should provide a platform for them to elaborate. These should NOT give away answers but should feel like opportunities to demonstrate knowledge.
+1. Questions 1-2 are SCAFFOLDING prompts: each should focus on a single idea the student hinted at but did not explain fully. Ask for one concrete example, clarification, or link to course vocabulary. Keep the tone supportive and conversational.
 
-2. Question 3 should be a STRETCH GOAL - more challenging but in the area where the student showed the most competence. This should allow them to go deeper and demonstrate advanced understanding, aligned with the rubric and syllabus.
+2. Question 3 is a STRETCH prompt in the student's strongest area. It can push slightly deeper, but it must still be answerable quickly—ask for one additional implication, comparison, or next step, not an essay.
 
-CRITICAL: DO NOT mention specific scholars or authors by name UNLESS they are absolutely foundational to the field (e.g., Claude Lévi-Strauss, Clifford Geertz). For niche topics or specialized cards, avoid citing obscure scholars the student may not have encountered. Focus on concepts, frameworks, and theoretical approaches rather than names.
+STYLE REQUIREMENTS:
+- One sentence per question, plain language, no semi-colons.
+- Avoid multipart lists (no "first..., then..."). Ask for one thing only.
+- Sound like natural spoken dialogue ("Could you share…", "What’s one way…").
+- Do NOT mention scholars unless they are foundational (e.g., Claude Lévi-Strauss, Clifford Geertz).
 
 Return ONLY three questions, one per line, no numbering or preamble.`,
               },
@@ -120,17 +118,17 @@ TRANSCRIPT (${label}):
 ${transcript}
 
 TASK: Generate EXACTLY three follow-up questions following the strategy:
-- Q1-2: Scaffolding questions that help the student demonstrate knowledge they may have but didn't fully articulate. Look for gaps where they understand concepts but missed specific examples, important terminology, or theoretical connections. These should feel supportive but not give away answers.
-- Q3: A stretch goal in their strongest area - challenge them to go deeper where they showed competence.
+- Q1-2: Friendly scaffolding that invites one concise clarification, example, or definition the student can deliver in under a minute.
+- Q3: A conversational stretch prompt in their strongest area, still answerable in about a minute with one clear idea plus a short elaboration.
 
-REMEMBER: Avoid mentioning obscure scholars by name. Focus on concepts, frameworks, and theoretical approaches.
+REMEMBER: Keep each question single-focus, spoken in one sentence, and avoid obscure scholar names.
 
 Return ONLY the three questions, one per line, no numbering.`,
-              },
-            ],
-          }),
-          signal: ac.signal,
-        }
+            },
+          ],
+        },
+        "/chat/completions",
+        { signal: ac.signal }
       );
 
       if (!response.ok) {

@@ -32,6 +32,19 @@ export interface AirtableCard {
   };
 }
 
+// Exams table (NEW - stores metadata for each exam)
+export interface AirtableExam {
+  id?: string;
+  fields: {
+    session_id: string;      // PRIMARY: Unique session ID (studentName_timestamp)
+    student_name: string;    // Student's name
+    cards?: string;           // Comma-separated card names
+    timestamp?: string;       // ISO datetime
+    name_cards_recording?: string; // Path to name/cards recording file
+    [key: string]: string | undefined;
+  };
+}
+
 // Transcripts table
 export interface AirtableTranscript {
   id?: string;

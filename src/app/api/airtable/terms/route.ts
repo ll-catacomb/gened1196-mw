@@ -2,10 +2,23 @@ import { NextResponse } from "next/server";
 import { fetchCardDefinitions, fetchAllCards } from "@/lib/airtable";
 
 /**
- * GET /api/airtable/terms - Fetch all available cards
+ * GET /api/airtable/terms - Fetch all available cards or definitions for specific terms
  */
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const url = new URL(req.url);
+    const termsParam = url.searchParams.get("terms");
+
+    if (termsParam) {
+      const cardNames = termsParam
+        .split(",")
+        .map((term) => term.trim())
+        .filter((term) => term.length > 0);
+
+      const definitions = await fetchCardDefinitions(cardNames);
+      return NextResponse.json({ definitions });
+    }
+
     const cards = await fetchAllCards();
     return NextResponse.json({ cards });
   } catch (error: any) {

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { MODELS } from "@/config/constants";
 import type { WhisperTranscriptionResponse } from "@/types";
+import { transcribeAudioFile } from "@/lib/transcribe";
 
 export async function POST(req: Request) {
   try {
@@ -14,35 +14,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // Create form data for OpenAI Whisper API
-    const whisperFormData = new FormData();
-    whisperFormData.append("file", audioFile);
-    whisperFormData.append("model", MODELS.WHISPER);
-    whisperFormData.append("response_format", "json");
-
-    const response = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: whisperFormData,
-      }
+    const result: WhisperTranscriptionResponse = await transcribeAudioFile(
+      audioFile
     );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return NextResponse.json(
-        { error: `Whisper API error: ${errorText}` },
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    const result: WhisperTranscriptionResponse = {
-      text: data.text || "",
-    };
 
     return NextResponse.json(result);
   } catch (error: any) {
