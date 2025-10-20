@@ -14,6 +14,7 @@ export async function POST(req: Request) {
       studentCards,
       fullTranscript,
       questionsWithAnswers,
+      recordingFiles,
     } = body;
 
     if (!fullTranscript || !studentCards || !studentName) {
@@ -30,7 +31,8 @@ export async function POST(req: Request) {
       studentName,
       studentCards,
       cardsString,
-      isArray: Array.isArray(studentCards)
+      isArray: Array.isArray(studentCards),
+      recordingFiles,
     });
     
     const transcriptData: AirtableTranscript["fields"] = {
@@ -81,7 +83,8 @@ export async function POST(req: Request) {
 
     console.log("Saving questions to Airtable:", {
       count: questionsWithAnswers?.length,
-      questions: questionsWithAnswers
+      questions: questionsWithAnswers,
+      recordingFiles,
     });
 
     if (questionsWithAnswers && Array.isArray(questionsWithAnswers)) {
@@ -118,7 +121,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ 
       success: true, 
       transcriptId: transcriptResult.id,
-      questionIds: questionResults.map(r => r.id)
+      questionIds: questionResults.map(r => r.id),
+      recordingFiles,
     });
   } catch (error: any) {
     console.error("Error saving to Airtable:", error);

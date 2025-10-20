@@ -36,6 +36,8 @@ export default function Home() {
   
   // Question answers (recorded during question phase)
   const [questionAnswers, setQuestionAnswers] = useState<string[]>(["", "", ""]);
+  const [presentationRecordingFile, setPresentationRecordingFile] = useState<string | null>(null);
+  const [questionRecordingFiles, setQuestionRecordingFiles] = useState<string[]>(["", "", ""]);
   const questionStartTimeRef = useRef<number>(0);
   
   // Text-to-speech for bot mode
@@ -87,6 +89,10 @@ export default function Home() {
     try {
       // Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setTranscript("");
+      setQuestionAnswers(["", "", ""]);
+      setPresentationRecordingFile(null);
+      setQuestionRecordingFiles(["", "", ""]);
       
       // Initialize recorder with stream
       audioRecorderRef.current = new AudioRecorder();
@@ -129,6 +135,12 @@ export default function Home() {
         // Change stage immediately and show loading spinner
         setQuestionsLoading(true);
         setStage("question-mode");
+        
+        // Persist presentation recording before transcription
+        const presentationFile = await persistRecording(blob, "presentation");
+        if (presentationFile) {
+          setPresentationRecordingFile(presentationFile);
+        }
         
         // Transcribe presentation audio
         const transcriptText = await transcribeAudio(blob);
@@ -182,6 +194,36 @@ export default function Home() {
       console.error("Error extracting student info:", error);
       setStudentName("Unknown Student");
       setStudentCards([]);
+    }
+  }
+  
+  // Persist audio recording to server storage
+  async function persistRecording(audioBlob: Blob, context: string): Promise<string | null> {
+    try {
+      const formData = new FormData();
+      formData.append("audio", blobToFile(audioBlob, `${context}.webm`));
+      formData.append("context", context);
+      
+      const response = await fetch("/api/recordings", {
+        method: "POST",
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Recording persistence failed:", response.status, errorText);
+        return null;
+      }
+      
+      const data = await response.json();
+      const pathReference = data.relativePath || data.fileName || null;
+      if (pathReference) {
+        console.log(`Recording stored as ${pathReference}`);
+      }
+      return pathReference;
+    } catch (error) {
+      console.error("Error persisting recording:", error);
+      return null;
     }
   }
   
@@ -390,14 +432,17 @@ export default function Home() {
       // Create array of question-answer pairs
       const questionsWithAnswers = finalQuestions.map((question, index) => ({
         question,
-        answer: questionAnswers[index] || ""
+        answer: questionAnswers[index] || "",
+        recordingFile: questionRecordingFiles[index] || ""
       }));
       
       console.log("Saving to Airtable:", {
         studentName,
         studentCards,
         questions: finalQuestions,
-        answers: questionAnswers
+        answers: questionAnswers,
+        presentationRecordingFile,
+        questionRecordingFiles
       });
       
       const response = await fetch("/api/airtable/save", {
@@ -408,6 +453,10 @@ export default function Home() {
           studentCards: studentCards,
           fullTranscript: transcript,
           questionsWithAnswers: questionsWithAnswers,
+          recordingFiles: {
+            presentation: presentationRecordingFile,
+            questions: questionRecordingFiles,
+          },
         }),
       });
       
@@ -481,6 +530,14 @@ export default function Home() {
     try {
       // Stop current recording to get the answer
       const { blob } = await audioRecorderRef.current.stop();
+      const questionFile = await persistRecording(blob, `question-${questionIndex + 1}`);
+      if (questionFile) {
+        setQuestionRecordingFiles(prev => {
+          const updated = [...prev];
+          updated[questionIndex] = questionFile;
+          return updated;
+        });
+      }
       
       // Transcribe the answer
       const answerText = await transcribeAudio(blob);
@@ -517,21 +574,41 @@ export default function Home() {
   
   // ============ RENDER ============
   return (
-    <div style={{ 
-      minHeight: "100vh", 
-      background: "#f9fafb",
-      fontFamily: "system-ui, -apple-system, sans-serif",
-      padding: "24px"
-    }}>
-      <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+    <div
+      style={{
+        height: "100vh",
+        background: "#f9fafb",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        padding: "24px",
+        boxSizing: "border-box",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1400,
+          margin: "0 auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: "24px",
+          height: "100%",
+          minHeight: 0,
+        }}
+      >
         {/* ADMIN CONTROLS */}
-        <div style={{ 
-          background: "white", 
-          border: "2px solid #e5e7eb", 
-          borderRadius: 12, 
-          padding: 24,
-          marginBottom: 24
-        }}>
+        <div
+          style={{
+            background: "white",
+            border: "2px solid #e5e7eb",
+            borderRadius: 12,
+            padding: 24,
+            flex: 1,
+            overflowY: "auto",
+            minHeight: 0,
+            scrollbarGutter: "stable",
+          }}
+        >
           <div style={{ 
             fontSize: 12, 
             fontWeight: 600, 
@@ -1001,13 +1078,18 @@ export default function Home() {
         </div>
         
         {/* STUDENT VIEW (What student sees) */}
-        <div style={{ 
-          background: "white", 
-          border: "4px solid #10b981", 
-          borderRadius: 12, 
-          padding: 32,
-          minHeight: 400
-        }}>
+        <div
+          style={{
+            background: "white",
+            border: "4px solid #10b981",
+            borderRadius: 12,
+            padding: 32,
+            flex: 1,
+            overflowY: "auto",
+            minHeight: 0,
+            scrollbarGutter: "stable",
+          }}
+        >
           <div style={{ 
             fontSize: 12, 
             fontWeight: 600, 
